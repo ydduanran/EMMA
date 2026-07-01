@@ -16,18 +16,40 @@ The restore mode keeps observed entries unchanged and only replaces entries mark
 
 ## Installation
 
-Clone the repository and install it in editable mode:
+### Option A. Install From PyPI
+
+After the package is released to PyPI:
 
 ```bash
-git clone <this-repository-url>
-cd EMMA
-pip install -e .
+pip install emma-3dgenome
 ```
 
-For development and tests:
+### Option B. Install Directly From GitHub
+
+```bash
+pip install "git+https://github.com/ydduanran/EMMA.git"
+```
+
+### Option C. Install From Local Source
+
+Clone the repository and install it locally:
+
+```bash
+git clone https://github.com/ydduanran/EMMA.git
+cd EMMA
+pip install .
+```
+
+For editable development:
 
 ```bash
 pip install -e ".[dev]"
+```
+
+If your machine has no internet access but already has the required build tools installed, use:
+
+```bash
+pip install -e . --no-build-isolation
 ```
 
 Core dependencies include `numpy`, `scipy`, `torch`, `cooler`, `EMD-signal`, `scikit-learn`, and `scikit-image`.
