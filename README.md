@@ -309,26 +309,6 @@ result = restorer.reconstruct(matrix, mode="conservative", blend=0.2)
 result.save("reconstructed_out")
 ```
 
-## IMF Parameters
-
-Default mode-weighted reconstruction parameters:
-
-```text
-max_imfs = 5
-imf_weights = 0.08 1.35 1.20 1.90 0.80
-residual_weight = 1.0
-diag_calib_strength = 0.20
-```
-
-Interpretation:
-
-- IMF1: high-frequency noise component, strongly down-weighted.
-- IMF2: local structure component, enhanced.
-- IMF3: intermediate-scale structure component, enhanced.
-- IMF4: domain or boundary-related structure component, strongly enhanced.
-- IMF5: low-frequency structure component, slightly retained.
-- Residual: global trend, retained.
-
 Override from CLI:
 
 ```bash
@@ -375,8 +355,8 @@ If you use EMMA in your work, please cite the EMMA manuscript when it becomes av
 
 ```bibtex
 @article{emma2026,
-  title = {EMMA: EMD-guided masked autoencoder restoration of chromatin interaction maps},
-  author = {To be updated},
+  title = {EMMA: Empirical Mode-guided Masked Autoencoder for Chromatin Interaction Map Restoration},
+  author = {Ran Duan, Dachang Dang, Shaowen Yao, Hong Peng},
   journal = {To be updated},
   year = {2026}
 }
