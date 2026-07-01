@@ -54,6 +54,68 @@ pip install -e . --no-build-isolation
 
 Core dependencies include `numpy`, `scipy`, `torch`, `cooler`, `EMD-signal`, `scikit-learn`, and `scikit-image`.
 
+## Version 0.2.0 Performance Notes
+
+EMMA 0.2.0 changes the default masked-autoencoder training path to avoid recomputing PyEMD inside every DataLoader sample. The default training pipeline now pseudo-masks IMF channels directly and keeps EMD decomposition in the matrix-level preprocessing stage. This makes GPU training substantially less CPU-bound.
+
+To reproduce the slower 0.1.x training behavior that recomputes EMD for every pseudo-masked sample, use:
+
+```bash
+emma restore sample.mcool \
+  --resolution 10000 \
+  --chrom chr2 \
+  --mask-regions missing_regions.bed \
+  --recompute-pseudo-emd \
+  --output emma_out_legacy/
+```
+
+For CUDA runs on larger windows, start with:
+
+```bash
+emma restore sample.mcool \
+  --resolution 10000 \
+  --chrom chr2 \
+  --mask-regions missing_regions.bed \
+  --device cuda:0 \
+  --batch-size 256 \
+  --num-workers 8 \
+  --inference-batch-size 256 \
+  --output emma_out/
+```
+
+## Version 0.2.1 Windowed CLI
+
+EMMA supports direct bin-window analysis from the command line. `--start-bin` is inclusive and `--end-bin` is exclusive, using local bins within the selected chromosome or matrix.
+
+```bash
+emma restore /mnt/disk1/duanran/emhic_baseline/data/H1_ESC_4DNFI82R42AD.mcool \
+  --resolution 10000 \
+  --chrom chr2 \
+  --start-bin 9500 \
+  --end-bin 9700 \
+  --auto-mask \
+  --auto-mask-mode aggressive \
+  --device cuda:0 \
+  --preset default \
+  --max-diag 150 \
+  --patch-len 64 \
+  --stride 16 \
+  --epochs 35 \
+  --n-samples 30000 \
+  --batch-size 128 \
+  --recompute-pseudo-emd \
+  --output emma_chr2_9500_9700_out/
+```
+
+When writing detected BED regions for windowed `.cool` or `.mcool` input, EMMA adds `--start-bin` back to the local detected bins so the BED coordinates remain chromosome-level genomic coordinates.
+
+## Notebooks
+
+The repository includes two executed notebooks under [`notebooks/`](notebooks/). Outputs are kept in the notebooks so readers can inspect representative results without rerunning the full workflows.
+
+- [`EMMA_tutorial.ipynb`](notebooks/EMMA_tutorial.ipynb): a step-by-step tutorial for loading an `.mcool` Hi-C window, detecting real missing bins, running EMMA restoration, and visualizing the restored matrix.
+- [`EMMA_baseline_analysis.ipynb`](notebooks/EMMA_baseline_analysis.ipynb): the baseline-comparison analysis pipeline for reproducing the paper-style comparison tables, including baseline comparisons and EMMA ablation summaries.
+
 ## Quick Start
 
 ### 1. Restore With A BED Missing-Region File

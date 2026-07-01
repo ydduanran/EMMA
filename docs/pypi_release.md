@@ -18,8 +18,8 @@ python -m build
 This creates:
 
 ```text
-dist/emma_3dgenome-0.1.0.tar.gz
-dist/emma_3dgenome-0.1.0-py3-none-any.whl
+dist/emma_3dgenome-0.2.1.tar.gz
+dist/emma_3dgenome-0.2.1-py3-none-any.whl
 ```
 
 ## Check The Package

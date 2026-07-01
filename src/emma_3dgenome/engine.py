@@ -14,7 +14,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, get_worker_info
 
 
 # ============================================================
@@ -605,7 +605,8 @@ class MaskedIMFAutoEncoderDataset(Dataset):
     训练逻辑：
     1. 真实缺失区域 real_missing 不参与训练。
     2. 从正常观测区域随机 pseudo-mask。
-    3. 输入：pseudo-mask 后的 IMF 表征。
+    3. 默认输入：pseudo-mask 后的 IMF 通道，不在 __getitem__ 内重复 EMD。
+       如需复现旧版行为，可设置 recompute_pseudo_emd=True。
     4. 目标：恢复 pseudo-mask 位置的 target_imfs 和 target_y。
     """
 
@@ -622,6 +623,7 @@ class MaskedIMFAutoEncoderDataset(Dataset):
         seed=2026,
         input_clip=8.0,
         target_clip=5.0,
+        recompute_pseudo_emd=False,
     ):
         self.diag_features = diag_features
         self.patch_len = int(patch_len)
@@ -633,8 +635,10 @@ class MaskedIMFAutoEncoderDataset(Dataset):
         self.residual_smooth_window = int(residual_smooth_window)
         self.input_clip = float(input_clip)
         self.target_clip = float(target_clip)
+        self.recompute_pseudo_emd = bool(recompute_pseudo_emd)
 
-        self.rng = np.random.default_rng(seed)
+        self.seed = int(seed)
+        self.rng = np.random.default_rng(self.seed)
 
         self.available_diags = []
 
@@ -649,11 +653,21 @@ class MaskedIMFAutoEncoderDataset(Dataset):
     def __len__(self):
         return self.n_samples
 
+    def _rng(self):
+        worker = get_worker_info()
+        if worker is None:
+            return self.rng
+        rng = getattr(self, "_worker_rng", None)
+        if rng is None:
+            rng = np.random.default_rng(self.seed + 1009 * int(worker.id))
+            self._worker_rng = rng
+        return rng
+
     def _sample_patch_position(self, L):
         if L <= self.patch_len:
             return 0, L
 
-        start = self.rng.integers(0, L - self.patch_len + 1)
+        start = self._rng().integers(0, L - self.patch_len + 1)
         end = start + self.patch_len
         return int(start), int(end)
 
@@ -665,8 +679,9 @@ class MaskedIMFAutoEncoderDataset(Dataset):
         return out, valid_len
 
     def __getitem__(self, idx):
+        rng = self._rng()
         for _ in range(80):
-            k = int(self.rng.choice(self.available_diags))
+            k = int(rng.choice(self.available_diags))
             feat = self.diag_features[k]
             L = feat["length"]
 
@@ -698,7 +713,7 @@ class MaskedIMFAutoEncoderDataset(Dataset):
             n_mask = max(4, int(len(obs_idx) * self.pseudo_mask_ratio))
             n_mask = min(n_mask, len(obs_idx))
 
-            pseudo_idx = self.rng.choice(obs_idx, size=n_mask, replace=False)
+            pseudo_idx = rng.choice(obs_idx, size=n_mask, replace=False)
 
             pseudo_mask = np.zeros(self.patch_len, dtype=np.float32)
             pseudo_mask[pseudo_idx] = 1.0
@@ -722,26 +737,36 @@ class MaskedIMFAutoEncoderDataset(Dataset):
                 neginf=0.0,
             ).astype(np.float32)
 
-            input_imfs, input_residual, _ = emd_decompose_1d_fixed(
-                y_init=y_pseudo_init,
-                max_imfs=self.max_imfs,
-            )
+            if self.recompute_pseudo_emd:
+                input_imfs, input_residual, _ = emd_decompose_1d_fixed(
+                    y_init=y_pseudo_init,
+                    max_imfs=self.max_imfs,
+                )
 
-            input_residual_smooth = smooth_1d_nan_aware(
-                input_residual,
-                window=self.residual_smooth_window,
-            )
-            input_residual_smooth = np.where(
-                np.isfinite(input_residual_smooth),
-                input_residual_smooth,
-                input_residual,
-            )
-            input_residual_smooth = np.nan_to_num(
-                input_residual_smooth,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            ).astype(np.float32)
+                input_residual_smooth = smooth_1d_nan_aware(
+                    input_residual,
+                    window=self.residual_smooth_window,
+                )
+                input_residual_smooth = np.where(
+                    np.isfinite(input_residual_smooth),
+                    input_residual_smooth,
+                    input_residual,
+                )
+                input_residual_smooth = np.nan_to_num(
+                    input_residual_smooth,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ).astype(np.float32)
+            else:
+                input_imfs = target_imfs.copy()
+                input_imfs[:, pseudo_idx] = 0.0
+                input_residual_smooth = np.nan_to_num(
+                    target_residual,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ).astype(np.float32)
 
             y_input = y_pseudo_missing.copy()
             y_input[~np.isfinite(y_input)] = y_pseudo_init[~np.isfinite(y_input)]
@@ -1015,7 +1040,8 @@ def train_masked_imf_autoencoder(
     num_workers=4,
     prefetch_factor=2,
     verbose=True,
-    debug_batch=True,
+    debug_batch=False,
+    recompute_pseudo_emd=False,
 ):
     set_seed(seed)
 
@@ -1032,15 +1058,18 @@ def train_masked_imf_autoencoder(
         max_diag=max_diag,
         residual_smooth_window=residual_smooth_window,
         seed=seed,
+        recompute_pseudo_emd=recompute_pseudo_emd,
     )
+
+    use_cuda = str(device).startswith("cuda")
 
     loader_kwargs = dict(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=(device == "cuda"),
-        drop_last=True,
+        pin_memory=use_cuda,
+        drop_last=False,
     )
 
     if num_workers > 0:
@@ -1070,11 +1099,16 @@ def train_masked_imf_autoencoder(
         T_max=max(1, epochs),
     )
 
-    print(
-        f"[DataLoader] batch_size={batch_size}, "
-        f"num_workers={loader.num_workers}, "
-        f"pin_memory={loader.pin_memory}"
-    )
+    if use_cuda:
+        torch.backends.cudnn.benchmark = True
+
+    if verbose:
+        print(
+            f"[DataLoader] batch_size={batch_size}, "
+            f"num_workers={loader.num_workers}, "
+            f"pin_memory={loader.pin_memory}, "
+            f"recompute_pseudo_emd={recompute_pseudo_emd}"
+        )
 
     if debug_batch:
         dbg = next(iter(loader))
@@ -1095,7 +1129,8 @@ def train_masked_imf_autoencoder(
 
     for ep in range(1, epochs + 1):
         model.train()
-        losses = []
+        loss_total = None
+        loss_count = 0
         skipped = 0
         n_batches = 0
         t0 = time.perf_counter()
@@ -1143,12 +1178,17 @@ def train_masked_imf_autoencoder(
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
             optimizer.step()
 
-            losses.append(float(loss.detach().cpu()))
+            loss_detached = loss.detach()
+            loss_total = loss_detached if loss_total is None else loss_total + loss_detached
+            loss_count += 1
 
         scheduler.step()
 
         elapsed = time.perf_counter() - t0
-        mean_loss = float(np.mean(losses)) if len(losses) > 0 else np.nan
+        if loss_total is not None and loss_count > 0:
+            mean_loss = float((loss_total / loss_count).detach().cpu())
+        else:
+            mean_loss = np.nan
         batch_per_sec = n_batches / max(elapsed, 1e-6)
 
         if verbose:
@@ -1166,7 +1206,7 @@ def train_masked_imf_autoencoder(
         if np.isfinite(mean_loss) and mean_loss < best_loss:
             best_loss = mean_loss
             best_state = {
-                k: v.detach().cpu().clone()
+                k: v.detach().clone()
                 for k, v in model.state_dict().items()
             }
             bad_epochs = 0
@@ -1272,6 +1312,7 @@ def predict_one_diagonal_mae_imfs(
     max_imfs=4,
     max_diag=500,
     device=None,
+    inference_batch_size=256,
 ):
     if device is None:
         device = next(model.parameters()).device
@@ -1288,29 +1329,38 @@ def predict_one_diagonal_mae_imfs(
         if starts[-1] != L - patch_len:
             starts.append(L - patch_len)
 
-    for start in starts:
-        end = min(L, start + patch_len)
+    inference_batch_size = max(1, int(inference_batch_size))
 
-        x, valid_len = build_real_mask_inference_input_patch(
-            feat=feat,
-            k=k,
-            start=start,
-            end=end,
-            patch_len=patch_len,
-            max_imfs=max_imfs,
-            max_diag=max_diag,
-        )
+    for batch_start in range(0, len(starts), inference_batch_size):
+        batch_starts = starts[batch_start: batch_start + inference_batch_size]
+        xs = []
+        valid_lens = []
 
-        xt = torch.from_numpy(x[None, :, :]).to(device).float()
-        pred_imfs = model(xt).detach().cpu().numpy()[0]
+        for start in batch_starts:
+            end = min(L, start + patch_len)
 
-        pred_imfs = np.nan_to_num(pred_imfs, nan=0.0, posinf=0.0, neginf=0.0)
-        pred_imfs = np.clip(pred_imfs, -5.0, 5.0).astype(np.float32)
+            x, valid_len = build_real_mask_inference_input_patch(
+                feat=feat,
+                k=k,
+                start=start,
+                end=end,
+                patch_len=patch_len,
+                max_imfs=max_imfs,
+                max_diag=max_diag,
+            )
+            xs.append(x)
+            valid_lens.append(valid_len)
 
-        real_end = start + valid_len
+        xb = np.stack(xs, axis=0).astype(np.float32)
+        xt = torch.from_numpy(xb).to(device, non_blocking=True).float()
+        pred_batch = model(xt).detach().cpu().numpy()
+        pred_batch = np.nan_to_num(pred_batch, nan=0.0, posinf=0.0, neginf=0.0)
+        pred_batch = np.clip(pred_batch, -5.0, 5.0).astype(np.float32)
 
-        imfs_sum[:, start:real_end] += pred_imfs[:, :valid_len]
-        weight_sum[:, start:real_end] += 1.0
+        for start, valid_len, pred_imfs in zip(batch_starts, valid_lens, pred_batch):
+            real_end = start + valid_len
+            imfs_sum[:, start:real_end] += pred_imfs[:, :valid_len]
+            weight_sum[:, start:real_end] += 1.0
 
     pred_imfs_full = imfs_sum / (weight_sum + 1e-6)
     pred_imfs_full = np.nan_to_num(pred_imfs_full, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1336,6 +1386,7 @@ def apply_masked_imf_autoencoder_to_real_mask(
     replace_strength=1.0,
     obs_imf_beta=0.0,
     device=None,
+    inference_batch_size=256,
     verbose=True,
 ):
     out_features = {}
@@ -1361,6 +1412,7 @@ def apply_masked_imf_autoencoder_to_real_mask(
             max_imfs=max_imfs,
             max_diag=max_diag,
             device=device,
+            inference_batch_size=inference_batch_size,
         )
 
         imfs_new = imfs.copy()
@@ -1771,15 +1823,18 @@ def run_context_init_masked_imf_autoencoder_emd_hic_imputation(
     batch_size=128,
     epochs=20,
     lr=1e-4,
+    weight_decay=1e-4,
     base_channels=32,
     depth=3,
     dropout=0.05,
     num_workers=4,
     prefetch_factor=2,
+    recompute_pseudo_emd=False,
 
     # MAE inference
     replace_strength=1.0,
     obs_imf_beta=0.0,
+    inference_batch_size=256,
 
     # reconstruction
     imf_weights=(0.08, 1.35, 1.20, 0.90),
@@ -1794,7 +1849,7 @@ def run_context_init_masked_imf_autoencoder_emd_hic_imputation(
     seed=2026,
     device=None,
     verbose=True,
-    debug_batch=True,
+    debug_batch=False,
 ):
     set_seed(seed)
 
@@ -1873,7 +1928,7 @@ def run_context_init_masked_imf_autoencoder_emd_hic_imputation(
         batch_size=batch_size,
         epochs=epochs,
         lr=lr,
-        weight_decay=1e-4,
+        weight_decay=weight_decay,
         base_channels=base_channels,
         depth=depth,
         dropout=dropout,
@@ -1884,6 +1939,7 @@ def run_context_init_masked_imf_autoencoder_emd_hic_imputation(
         prefetch_factor=prefetch_factor,
         verbose=verbose,
         debug_batch=debug_batch,
+        recompute_pseudo_emd=recompute_pseudo_emd,
     )
 
     device_used = train_report["device"]
@@ -1900,6 +1956,7 @@ def run_context_init_masked_imf_autoencoder_emd_hic_imputation(
         replace_strength=replace_strength,
         obs_imf_beta=obs_imf_beta,
         device=device_used,
+        inference_batch_size=inference_batch_size,
         verbose=verbose,
     )
 
@@ -2220,7 +2277,7 @@ def run_chrom(args, chrom):
         device=args.device,
         seed=args.seed,
         verbose=True,
-        debug_batch=True,
+        debug_batch=False,
     )
     mat_final_z = result["mat_final"].astype(np.float32)
     mat_rec = restore_from_diagonal_zscore(

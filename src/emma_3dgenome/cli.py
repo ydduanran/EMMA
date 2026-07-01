@@ -31,6 +31,7 @@ def _build_restorer(args: argparse.Namespace) -> EmmaRestorer:
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "lr": args.lr,
+        "weight_decay": args.weight_decay,
         "patch_len": args.patch_len,
         "stride": args.stride,
         "n_samples": args.n_samples,
@@ -38,6 +39,10 @@ def _build_restorer(args: argparse.Namespace) -> EmmaRestorer:
         "base_channels": args.base_channels,
         "depth": args.depth,
         "dropout": args.dropout,
+        "num_workers": args.num_workers,
+        "prefetch_factor": args.prefetch_factor,
+        "inference_batch_size": args.inference_batch_size,
+        "recompute_pseudo_emd": args.recompute_pseudo_emd,
         "verbose": args.verbose,
     }
     if args.imf_weights is not None:
@@ -49,6 +54,8 @@ def _add_common_matrix_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("path", type=Path, help="Input .cool, .mcool, .npy, or .npz file.")
     parser.add_argument("--chrom", default=None, help="Chromosome for .cool/.mcool input.")
     parser.add_argument("--resolution", type=int, default=None, help="Resolution for .mcool input.")
+    parser.add_argument("--start-bin", type=int, default=None, help="Inclusive local bin start for windowed analysis.")
+    parser.add_argument("--end-bin", type=int, default=None, help="Exclusive local bin end for windowed analysis.")
     parser.add_argument("--balance", action="store_true", help="Use balanced cooler matrix if available.")
     parser.add_argument("--key", default=None, help="Array key for .npz input.")
 
@@ -66,6 +73,7 @@ def _add_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--patch-len", type=int, default=256)
     parser.add_argument("--stride", type=int, default=128)
     parser.add_argument("--n-samples", type=int, default=30000)
@@ -73,23 +81,44 @@ def _add_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.05)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--prefetch-factor", type=int, default=2)
+    parser.add_argument("--inference-batch-size", type=int, default=256)
+    parser.add_argument("--recompute-pseudo-emd", action="store_true")
     parser.add_argument("--verbose", action="store_true")
 
 
 def _cmd_info(args: argparse.Namespace) -> None:
     payload = get_chrom_info(args.path, resolution=args.resolution)
     if args.chrom is not None and args.path.suffix.lower() in {".cool", ".mcool"}:
-        matrix = load_contact_matrix(args.path, chrom=args.chrom, resolution=args.resolution)
+        matrix = load_contact_matrix(
+            args.path,
+            chrom=args.chrom,
+            resolution=args.resolution,
+            start_bin=args.start_bin,
+            end_bin=args.end_bin,
+        )
         payload["selected_chrom"] = args.chrom
         payload["selected_shape"] = list(matrix.shape)
     elif args.path.suffix.lower() in {".npy", ".npz"}:
-        matrix = load_contact_matrix(args.path, key=args.key)
+        matrix = load_contact_matrix(args.path, key=args.key, start_bin=args.start_bin, end_bin=args.end_bin)
         payload["shape"] = list(matrix.shape)
+    payload["start_bin"] = args.start_bin
+    payload["end_bin"] = args.end_bin
     print(json.dumps(payload, indent=2, default=str))
 
 
 def _cmd_detect(args: argparse.Namespace) -> None:
-    matrix = load_contact_matrix(args.path, chrom=args.chrom, resolution=args.resolution, balance=args.balance, key=args.key)
+    matrix = load_contact_matrix(
+        args.path,
+        chrom=args.chrom,
+        resolution=args.resolution,
+        balance=args.balance,
+        key=args.key,
+        start_bin=args.start_bin,
+        end_bin=args.end_bin,
+    )
+    bin_offset = 0 if args.start_bin is None else int(args.start_bin)
     mask_info = detect_missing_bins(
         matrix,
         chrom=args.chrom,
@@ -97,9 +126,10 @@ def _cmd_detect(args: argparse.Namespace) -> None:
         mode=args.auto_mask_mode,
         max_diag=args.max_diag,
         exclude_bed=_path_or_none(args.exclude_bed),
+        bin_offset=bin_offset,
     )
     args.output.mkdir(parents=True, exist_ok=True)
-    mask_info.save(args.output, chrom=args.chrom, resolution=args.resolution)
+    mask_info.save(args.output, chrom=args.chrom, resolution=args.resolution, bin_offset=bin_offset)
     write_json(
         args.output / "report.json",
         {
@@ -107,6 +137,9 @@ def _cmd_detect(args: argparse.Namespace) -> None:
             "input_path": str(args.path),
             "chrom": args.chrom,
             "resolution": args.resolution,
+            "start_bin": args.start_bin,
+            "end_bin": args.end_bin,
+            "window_shape": list(matrix.shape),
             "auto_mask_mode": args.auto_mask_mode,
             "missing_bins": len(mask_info.missing_bins),
             "excluded_bins": len(mask_info.excluded_bins or []),
@@ -133,14 +166,26 @@ def _cmd_restore(args: argparse.Namespace) -> None:
         output_dir=args.output,
         balance=args.balance,
         key=args.key,
+        start_bin=args.start_bin,
+        end_bin=args.end_bin,
     )
     print(f"Saved restoration outputs to {args.output}")
 
 
 def _cmd_reconstruct(args: argparse.Namespace) -> None:
-    matrix = load_contact_matrix(args.path, chrom=args.chrom, resolution=args.resolution, balance=args.balance, key=args.key)
+    matrix = load_contact_matrix(
+        args.path,
+        chrom=args.chrom,
+        resolution=args.resolution,
+        balance=args.balance,
+        key=args.key,
+        start_bin=args.start_bin,
+        end_bin=args.end_bin,
+    )
     restorer = _build_restorer(args)
     result = restorer.reconstruct(matrix, mode=args.mode, blend=args.blend)
+    if result.report is not None:
+        result.report.update({"start_bin": args.start_bin, "end_bin": args.end_bin, "window_shape": list(matrix.shape)})
     result.save(args.output)
     print(f"Saved reconstruction outputs to {args.output}")
 

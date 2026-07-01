@@ -178,12 +178,16 @@ class EmmaRestorer:
                 batch_size=cfg.batch_size,
                 epochs=cfg.epochs,
                 lr=cfg.lr,
+                weight_decay=cfg.weight_decay,
                 base_channels=cfg.base_channels,
                 depth=cfg.depth,
                 dropout=cfg.dropout,
                 num_workers=cfg.num_workers,
+                prefetch_factor=cfg.prefetch_factor,
+                recompute_pseudo_emd=cfg.recompute_pseudo_emd,
                 replace_strength=cfg.replace_strength,
                 obs_imf_beta=cfg.obs_imf_beta,
+                inference_batch_size=cfg.inference_batch_size,
                 imf_weights=cfg.imf_weights,
                 residual_weight=cfg.residual_weight,
                 do_streak_suppression=cfg.do_streak_suppression,
@@ -193,7 +197,7 @@ class EmmaRestorer:
                 seed=cfg.seed,
                 device=cfg.device,
                 verbose=cfg.verbose,
-                debug_batch=cfg.verbose,
+                debug_batch=False,
             )
 
         result, log_text = _run_captured(cfg.verbose, _work)
@@ -297,13 +301,24 @@ class EmmaRestorer:
         output_dir: str | Path | None = None,
         balance: bool = False,
         key: str | None = None,
+        start_bin: int | None = None,
+        end_bin: int | None = None,
     ) -> EmmaResult:
-        matrix = load_contact_matrix(path, chrom=chrom, resolution=resolution, balance=balance, key=key)
+        matrix = load_contact_matrix(
+            path,
+            chrom=chrom,
+            resolution=resolution,
+            balance=balance,
+            key=key,
+            start_bin=start_bin,
+            end_bin=end_bin,
+        )
         n_bins = matrix.shape[0]
+        bin_offset = 0 if start_bin is None else int(start_bin)
         mask_info: MaskInfo | None = None
 
         if mask is not None:
-            mask_arr = load_mask_matrix(mask, n_bins=n_bins)
+            mask_arr = load_mask_matrix(mask, n_bins=n_bins, start_bin=start_bin, end_bin=end_bin)
             bins = _selected_bins_from_mask(mask_arr).astype(int).tolist()
             mask_info = MaskInfo(mask=mask_arr, missing_bins=bins, regions=merge_bins_to_regions(bins))
         elif mask_regions is not None:
@@ -316,6 +331,7 @@ class EmmaRestorer:
                 n_bins=n_bins,
                 coordinate=mask_region_format,
                 max_diag=self.config.max_diag,
+                bin_offset=bin_offset,
             )
         elif auto_mask:
             mask_info = detect_missing_bins(
@@ -325,6 +341,7 @@ class EmmaRestorer:
                 mode=auto_mask_mode,
                 max_diag=self.config.max_diag,
                 exclude_bed=exclude_bed,
+                bin_offset=bin_offset,
             )
             if not mask_info.missing_bins:
                 raise ValueError(
@@ -341,13 +358,16 @@ class EmmaRestorer:
                     "input_path": str(path),
                     "chrom": chrom,
                     "resolution": resolution,
+                    "start_bin": start_bin,
+                    "end_bin": end_bin,
+                    "bin_offset": bin_offset,
                     "mask_source": "mask" if mask is not None else "mask_regions" if mask_regions is not None else "auto_mask",
                 }
             )
         if output_dir is not None:
             result.save(output_dir)
             if auto_mask or mask_regions is not None:
-                mask_info.save(output_dir, chrom=chrom, resolution=resolution)
+                mask_info.save(output_dir, chrom=chrom, resolution=resolution, bin_offset=bin_offset)
         return result
 
     def reconstruct(self, matrix: np.ndarray, mode: str = "conservative", blend: float | None = None) -> EmmaResult:

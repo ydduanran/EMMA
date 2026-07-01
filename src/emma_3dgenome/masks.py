@@ -22,13 +22,22 @@ class MaskInfo:
     diagnostics: Any | None = None
     excluded_bins: list[int] | None = None
 
-    def save(self, output_dir: str | Path, chrom: str | None = None, resolution: int | None = None) -> None:
+    def save(
+        self,
+        output_dir: str | Path,
+        chrom: str | None = None,
+        resolution: int | None = None,
+        bin_offset: int = 0,
+    ) -> None:
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
         np.save(output / "mask.npy", self.mask.astype(bool))
         _dataframe({"bin": self.missing_bins}).to_csv(output / "detected_missing_bins.tsv", sep="\t", index=False)
         if chrom and resolution:
-            (output / "detected_missing_regions.bed").write_text(regions_to_bed(self.regions, chrom, resolution), encoding="utf-8")
+            (output / "detected_missing_regions.bed").write_text(
+                regions_to_bed(self.regions, chrom, resolution, bin_offset=bin_offset),
+                encoding="utf-8",
+            )
         else:
             _dataframe(self.regions, columns=["start_bin", "end_bin"]).to_csv(output / "detected_missing_regions.bed", sep="\t", index=False, header=False)
         if self.excluded_bins is not None:
@@ -115,10 +124,21 @@ def mask_from_bin_regions(n_bins: int, regions: list[tuple[int, int]], max_diag:
     return mask_from_bins(n_bins, bins, max_diag=max_diag)
 
 
-def load_mask_matrix(path: str | Path, n_bins: int | None = None) -> np.ndarray:
+def load_mask_matrix(
+    path: str | Path,
+    n_bins: int | None = None,
+    start_bin: int | None = None,
+    end_bin: int | None = None,
+) -> np.ndarray:
     mask = np.load(path).astype(bool)
     if mask.ndim != 2 or mask.shape[0] != mask.shape[1]:
         raise ValueError(f"Mask must be a square boolean matrix. Got shape={mask.shape}.")
+    if (start_bin is not None or end_bin is not None) and n_bins is not None and mask.shape != (n_bins, n_bins):
+        start = 0 if start_bin is None else int(start_bin)
+        end = mask.shape[0] if end_bin is None else int(end_bin)
+        if start < 0 or end <= start or end > mask.shape[0]:
+            raise ValueError(f"Invalid mask bin window: start_bin={start}, end_bin={end}.")
+        mask = mask[start:end, start:end]
     if n_bins is not None and mask.shape != (n_bins, n_bins):
         raise ValueError(f"Mask shape must match matrix shape. Expected {(n_bins, n_bins)}, got {mask.shape}.")
     return mask
@@ -142,10 +162,17 @@ def merge_bins_to_regions(bins: list[int] | np.ndarray, min_region_len: int = 1,
     return regions
 
 
-def regions_to_bed(regions: list[tuple[int, int]], chrom: str, resolution: int) -> str:
+def regions_to_bed(
+    regions: list[tuple[int, int]],
+    chrom: str,
+    resolution: int,
+    bin_offset: int = 0,
+) -> str:
     lines = []
     for start, end in regions:
-        lines.append(f"{chrom}\t{int(start) * int(resolution)}\t{int(end) * int(resolution)}")
+        start_abs = int(start) + int(bin_offset)
+        end_abs = int(end) + int(bin_offset)
+        lines.append(f"{chrom}\t{start_abs * int(resolution)}\t{end_abs * int(resolution)}")
     return "\n".join(lines) + ("\n" if lines else "")
 
 
@@ -171,15 +198,23 @@ def load_mask_regions(
     n_bins: int,
     coordinate: str = "auto",
     max_diag: int | None = None,
+    bin_offset: int = 0,
 ) -> MaskInfo:
     raw = _read_regions(path, chrom=chrom)
     regions: list[tuple[int, int]] = []
     for _, start, end in raw:
-        if coordinate == "bin" or (coordinate == "auto" and max(start, end) <= n_bins):
+        if coordinate == "bin":
+            if bin_offset and max(start, end) > n_bins:
+                s, e = start - int(bin_offset), end - int(bin_offset)
+            else:
+                s, e = start, end
+        elif coordinate == "auto" and max(start, end) <= n_bins:
             s, e = start, end
+        elif coordinate == "auto" and bin_offset and start >= int(bin_offset) and end <= int(bin_offset) + int(n_bins):
+            s, e = start - int(bin_offset), end - int(bin_offset)
         else:
-            s = start // int(resolution)
-            e = int(np.ceil(end / int(resolution)))
+            s = start // int(resolution) - int(bin_offset)
+            e = int(np.ceil(end / int(resolution))) - int(bin_offset)
         s = max(0, min(int(n_bins), int(s)))
         e = max(0, min(int(n_bins), int(e)))
         if e > s:
@@ -188,7 +223,13 @@ def load_mask_regions(
     return MaskInfo(mask=mask_from_bins(n_bins, bins, max_diag=max_diag), missing_bins=sorted(set(bins)), regions=regions)
 
 
-def filter_bins_by_exclude_bed(bins: list[int], chrom: str, resolution: int, exclude_bed: str | Path | None) -> tuple[list[int], list[int]]:
+def filter_bins_by_exclude_bed(
+    bins: list[int],
+    chrom: str,
+    resolution: int,
+    exclude_bed: str | Path | None,
+    bin_offset: int = 0,
+) -> tuple[list[int], list[int]]:
     if exclude_bed is None:
         return bins, []
     excluded: set[int] = set()
@@ -196,8 +237,8 @@ def filter_bins_by_exclude_bed(bins: list[int], chrom: str, resolution: int, exc
         s = start // int(resolution)
         e = int(np.ceil(end / int(resolution)))
         excluded.update(range(s, e))
-    kept = [b for b in bins if b not in excluded]
-    removed = sorted(set(bins) & excluded)
+    kept = [b for b in bins if int(b) + int(bin_offset) not in excluded]
+    removed = sorted({b for b in bins if int(b) + int(bin_offset) in excluded})
     return kept, removed
 
 
@@ -210,6 +251,7 @@ def detect_missing_bins(
     exclude_bed: str | Path | None = None,
     min_region_len: int | None = None,
     merge_gap: int | None = None,
+    bin_offset: int = 0,
 ) -> MaskInfo:
     if mode not in AUTO_MASK_PRESETS:
         raise ValueError(f"Unknown auto-mask mode '{mode}'.")
@@ -231,7 +273,13 @@ def detect_missing_bins(
     col_low = (col_sum <= threshold) | (col_nonzero <= preset["min_nonzero_ratio"])
     candidate = row_low & col_low if preset["require_row_and_col_low"] else row_low | col_low
     candidate_bins = np.where(candidate)[0].astype(int).tolist()
-    used_bins, excluded_bins = filter_bins_by_exclude_bed(candidate_bins, chrom or "", resolution or 1, exclude_bed)
+    used_bins, excluded_bins = filter_bins_by_exclude_bed(
+        candidate_bins,
+        chrom or "",
+        resolution or 1,
+        exclude_bed,
+        bin_offset=bin_offset,
+    )
     regions = merge_bins_to_regions(used_bins, min_region_len=min_region_len, merge_gap=merge_gap)
     region_bins = [b for s, e in regions for b in range(s, e)]
     mask = mask_from_bins(n, region_bins, max_diag=max_diag)
@@ -242,8 +290,9 @@ def detect_missing_bins(
         {
             "chrom": chrom,
             "bin_id": np.arange(n, dtype=int),
-            "start": np.arange(n, dtype=int) * int(resolution or 1),
-            "end": (np.arange(n, dtype=int) + 1) * int(resolution or 1),
+            "genomic_bin_id": np.arange(n, dtype=int) + int(bin_offset),
+            "start": (np.arange(n, dtype=int) + int(bin_offset)) * int(resolution or 1),
+            "end": (np.arange(n, dtype=int) + int(bin_offset) + 1) * int(resolution or 1),
             "row_sum": row_sum,
             "col_sum": col_sum,
             "row_nonzero_ratio": row_nonzero,

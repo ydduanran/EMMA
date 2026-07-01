@@ -26,6 +26,8 @@ def train_masked_imf_autoencoder(diag_features, config: EmmaConfig | None = None
         seed=cfg.seed,
         device=cfg.device,
         num_workers=cfg.num_workers,
+        prefetch_factor=cfg.prefetch_factor,
         verbose=cfg.verbose,
-        debug_batch=cfg.verbose,
+        debug_batch=False,
+        recompute_pseudo_emd=cfg.recompute_pseudo_emd,
     )

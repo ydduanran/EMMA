@@ -24,6 +24,7 @@ class EmmaConfig:
     base_channels: int = 32
     depth: int = 3
     dropout: float = 0.05
+    recompute_pseudo_emd: bool = False
 
     init_max_iter: int = 30
     init_sigma: float = 1.2
@@ -35,6 +36,7 @@ class EmmaConfig:
 
     replace_strength: float = 1.0
     obs_imf_beta: float = 0.0
+    inference_batch_size: int = 256
     do_diag_calibration: bool = True
     do_streak_suppression: bool = False
     streak_strength: float = 0.04
@@ -42,6 +44,7 @@ class EmmaConfig:
     seed: int = 2026
     device: str | None = None
     num_workers: int = 0
+    prefetch_factor: int = 2
     verbose: bool = False
 
     def validate(self) -> None:
@@ -62,10 +65,16 @@ class EmmaConfig:
             raise ValueError("epochs must be >= 0.")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be > 0.")
+        if self.inference_batch_size <= 0:
+            raise ValueError("inference_batch_size must be > 0.")
         if self.patch_len <= 0:
             raise ValueError("patch_len must be > 0.")
         if self.stride <= 0:
             raise ValueError("stride must be > 0.")
+        if self.num_workers < 0:
+            raise ValueError("num_workers must be >= 0.")
+        if self.prefetch_factor <= 0:
+            raise ValueError("prefetch_factor must be > 0.")
         if not 0 <= self.pseudo_mask_ratio < 1:
             raise ValueError("pseudo_mask_ratio must satisfy 0 <= pseudo_mask_ratio < 1.")
         if self.residual_weight < 0:
@@ -124,4 +133,3 @@ def merge_config(config: EmmaConfig | None = None, preset: str = "default", **ov
 
 def validate_config(config: EmmaConfig) -> None:
     config.validate()
-
