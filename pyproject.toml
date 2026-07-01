@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "emma-3dgenome"
+version = "0.1.0"
+description = "EMD-guided masked autoencoder for chromatin interaction map restoration"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "EMMA developers"}
+]
+keywords = ["Hi-C", "Pore-C", "3D genome", "chromatin", "imputation", "EMD"]
+dependencies = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "torch",
+  "cooler",
+  "EMD-signal",
+  "scikit-learn",
+  "scikit-image",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
+[project.scripts]
+emma = "emma_3dgenome.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
